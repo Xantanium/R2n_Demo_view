@@ -1,0 +1,17 @@
+#pragma once
+
+//////////////////////////////////////////////////////////////////////////
+/// ISR Prototypes
+//////////////////////////////////////////////////////////////////////////
+///
+
+/// Hardware ISR
+void ISR_DRIBBLE_LASER();
+void ISR_TURRET();
+void ISR_X_ENCODER();
+void ISR_YL_ENCODER();
+void ISR_YR_ENCODER();
+
+/// Timer ISR
+void ISR_PID_CONTROL();
+void ISR_I2C();
