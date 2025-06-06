@@ -1,6 +1,9 @@
 #pragma once
+#include "constants.h"
+#ifndef R1_pins
 #include <Arduino.h>
 #include "core_pins.h"
+
 
 // NOTE: A lot of this code is reduntant now, since many of these are removed from the robot.
 
@@ -42,7 +45,7 @@ README README README README README README README README README README README REA
 #define RELAY_PIN 26
 
 // LOCOMOTORS
-#ifndef R1
+#ifndef R1_pins
 #define DIR_A 0
 #define DIR_B 2
 #define DIR_C 6
@@ -180,3 +183,4 @@ namespace rudra {
  *            XXX   XXX                                        XX    XXX
  *              XXXXX                                           XXXXXX
  */
+#endif // R1_pins

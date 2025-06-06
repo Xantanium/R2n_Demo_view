@@ -3,7 +3,11 @@
 //
 #include "Motion.h"
 #include "constants.h"
+#ifndef R1_pins
 #include "r2_pins.h"
+#else
+#include "r1_pins.h"
+#endif
 #include "wiring.h"
 
 
@@ -24,7 +28,7 @@ void Motion::drive(const int argX, const int argY, const int argW) {
 
 /// @brief Calculates PWM values to be written to each wheel.
 void Motion::getSpeed() {
-#ifndef R1
+#ifndef R1_pins
     motion.maSpeed = ((motion.valX * (0.667f)) + (motion.valY * (0.000f)) + (motion.valW * 0.333f));
     motion.mbSpeed = ((motion.valX * (-0.333f)) + (motion.valY * (-0.577f)) + (motion.valW * 0.333f));
     motion.mcSpeed = ((motion.valX * (-0.333f)) + (motion.valY * (0.577f)) + (motion.valW * 0.333f));
@@ -50,7 +54,7 @@ void Motion::getSpeed() {
 void Motion::setMotion() {
     // NOTE: only use once all pins are defined
 
-#ifndef R1
+#ifndef R1_pins
 
     digitalWrite(DIR_A, motion.maSpeed < 0 ? 0 : 1);
     digitalWrite(DIR_B, motion.mbSpeed < 0 ? 0 : 1);
@@ -73,4 +77,3 @@ void Motion::setMotion() {
 
 #endif
 }
-

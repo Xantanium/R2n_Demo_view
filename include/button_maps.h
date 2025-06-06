@@ -9,7 +9,7 @@
 #define B_MPUSE ButtonEnum::R3
 #define B_TURRET_MODE ButtonEnum::R1
 #define B_INVERT ButtonEnum::BACK
-#define B_MBACK_DIR ButtonEnum::L3
+#define B_AUTO_TURRET ButtonEnum::L3
 
 // Transfer Mechanism
 #define T_TRANSFER_UP JoyEnum::R2

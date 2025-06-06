@@ -4,29 +4,31 @@
 #include "ShooterData.h"
 
 #include <cmath>
+#include "maths.h"
 
 namespace rudra {
-class Projectile {
-private:
-    int ppm();
-    float angle();
-    float projectileAngle();
+    class Projectile {
+    private:
+        // Private getters to return stuff into `ShooterData` struct instance
+        int ppm();
+        float angle(const float &);
+        float projectileAngle();
 
-    Pose hoopRelativePose;
+        Pose hoopRelativePose;
 
-    float hoopX;
-    float hoopY;
+        const float hoopX = 0.0f;
+        const float hoopY = 0.0f;
 
-    // distance of bot relative to hoop
-    float botHoopX;
-    float botHoopY;
+        // distance of bot relative to hoop
+        float botHoopX;
+        float botHoopY;
 
-    void convertToHoopRelative(Pose& botPose);
+        void convertToHoopRelative(const Pose &botPose);
 
-    float distanceFromHoop;
+        float distanceFromHoop;
 
-public:
-    void getProjectile(ShooterData& shooter, Pose& botPose);
-};
+    public:
+        void getProjectile(ShooterData &shooter, const Pose &botPose);
+    };
 
 } // namespace rudra

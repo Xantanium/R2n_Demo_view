@@ -2,10 +2,14 @@
 ////////////////////////////////////////////////////////////////////
 /// Standard Includes
 ////////////////////////////////////////////////////////////////////
+///
 #include <Arduino.h>
 #include <TeensyThreads.h>
 #include <Wire.h>
-
+#include "Algos/Odometry/Primitives.h"
+#include "Algos/Projectile/ShooterData.h"
+#include "core_pins.h"
+///
 ////////////////////////////////////////////////////////////////////
 /// Custom Libraries
 ////////////////////////////////////////////////////////////////////
@@ -16,9 +20,7 @@
 /// B. Mathematical Algorithms
 #include <../API/Algos/Odometry/ThreeXYEncoder/ThreeXYEncoder.hpp>
 #include <../API/Algos/PID/PID.h>
-#include "Operations/TransferState/TransferState.h"
-#include "Operations/Turret/Turret.h"
-#include "core_pins.h"
+#include <../API/Algos/Projectile/Projectile.h>
 #include "maths.h"
 ///
 ////////////////////////////////////////////////////////////////////
@@ -32,7 +34,11 @@
 #include "button_maps.h"
 #include "constants.h"
 #include "pins_arduino.h"
+#ifdef R1_pins
+#include "r1_pins.h"
+#else
 #include "r2_pins.h"
+#endif // R1
 ///
 /// C. Task Scheduler
 #include <Scheduler/Scheduler.h>
@@ -43,7 +49,13 @@
 /// Standard Libraries
 ////////////////////////////////////////////////////////////////////
 /// A. Threads
+// Scoped mutexes to be used, manual locking is boring af
+///
 Threads::Mutex SerialLock;
+Threads::Mutex OdomLock;
+Threads::Mutex PIDLock;
+Threads::Mutex ShooterLock;
+Threads::Mutex TurretLock;
 ///
 ////////////////////////////////////////////////////////////////////
 /// Custom Libraries
@@ -59,6 +71,19 @@ rudra::BNO bno;
 ///
 /// C. PID
 PID pidLocoW(1.0f, 0.0f, 0.0f, 80.0f, 50.0f);
+PID pidTurret(1.0f, 0.0f, 0.0f, 80.0f, 50.0f);
+///
+/// D. EncoderOdometry
+rudra::ThreeXYEncoder::PPRs pprs(600, 600, 600);
+rudra::ThreeXYEncoder encOdom(510.40f, 47.3f, pprs);
+rudra::Pose botPose(0, 0, 0);
+long int xCount { 0 }, yLCount { 0 }, yRCount { 0 };
+///
+/// E. Projectile
+rudra::ShooterData shooter;
+rudra::Projectile projectile;
+
+long int turretCount;
 ///
 ////////////////////////////////////////////////////////////////////
 /// Robot Functionality
@@ -165,6 +190,15 @@ void botInit();
 // E. Blink Example
 void blinkTask();
 //
+// F. PID loop
+void PIDTask();
+//
+// G. Resets and customary
+void resetTask_threaded();
+//
+// H. Odometry Task
+void odomTask();
+//
 /*----------------------- DRIVER CODE ----------------------------*/
 ////////////////////////////////////////////////////////////////////
 /// Setup
@@ -177,15 +211,35 @@ void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     rudra::pinInit(); // pin initialization is done here for a cleaner setup
     digitalWrite(LED_BUILTIN, 1);
-
+    BNO_WIRE.begin();
+    bno.bnoInit(BNO_WIRE);
     // scheduler config
+    /**
+     * Task Order:
+     * Acquire from controller
+     * -> handle relay
+     * -> get data from sensors
+     * -> calculate control and odom
+     * -> Locomotion
+     * -> Mechanism handling
+     * -> Serial debug
+     * -> loop resets (can be threaded)
+     */
     scheduler.addTask([] { ControllerState::controllerTask(Ps3); }, 0);
     scheduler.addTask([] { relayState.relayTask(); }, 0);
-    scheduler.addTask(imuTask, 10); // tasks defined in main can be passed directly without wrapper Lambda.
-    scheduler.addTask([] { motion.drive(motion.stickX, motion.stickY, motion.stickW); }, 0);
+    scheduler.addTask([] { imuTask(); }, 10);
+    scheduler.addTask([] { PIDTask(); }, 10);
+    scheduler.addTask([] { odomTask(); }, 10);
+    scheduler.addTask(
+            [] {
+                Threads::Scope pidScope(PIDLock);
+                motion.drive(motion.stickX, motion.stickY, motion.mpUse ? pidState.locoW : motion.stickW);
+            },
+            0);
     scheduler.addTask([] { turret.turretTask(); }, 10);
     scheduler.addTask([] { transfer.transferPipeline(); }, 10);
-    scheduler.addTask(debugTask, 300);
+    scheduler.addTask([] { debugTask(); }, 300);
+    scheduler.addTask([] { resetTask_threaded(); }, 10, true);
 
     // Ready to run
     delay(1000);
@@ -246,7 +300,8 @@ void ControllerState::getButtonMaps(XboxController &ps3) {
 
     if (Ps3.getButtonClick(B_MPUSE)) {
         motion.mpUse = !motion.mpUse;
-        turret.useJoyForMovement = motion.mpUse;
+        if (turret.runManually)
+            turret.useJoyForMovement = motion.mpUse;
     }
 
     if (Ps3.getButtonClick(B_THROW_SPEED_INC)) {
@@ -273,23 +328,28 @@ void ControllerState::getButtonMaps(XboxController &ps3) {
         dribbler.manual = true;
     if (Ps3.getButtonClick(B_INVERT))
         motion.invertAxis = !motion.invertAxis;
-    if (Ps3.getButtonClick(B_MBACK_DIR))
-        transfer.sendBallToDribble = !transfer.sendBallToDribble;
+    // if (Ps3.getButtonClick(B_MBACK_DIR))
+    //     transfer.sendBallToDribble = !transfer.sendBallToDribble;
+
+    if (Ps3.getButtonClick(B_AUTO_TURRET)) {
+        turret.runManually = !turret.runManually;
+    }
 }
 //
 // B. Data Acquisition
 void imuTask() {
-    if (!Ps3.isConnected || !relayState.isRelayOn)
-        return;
+    Threads::Scope odomScope(OdomLock);
     odom.yaw = bno.yaw(BNO_WIRE);
 }
 //
 // C. Debug Task
 void debugTask() {
-    // Threads::Scope scope(SerialLock);
+    Threads::Scope scope(SerialLock);
     Serial.printf("A: %f, B: %f, C: %f\n", motion.maCap, motion.mbCap, motion.mcCap);
     Serial.printf("RelayState: %d\n", relayState.isRelayOn);
     Serial.printf("Turret velo: %d\n", turret.velocity);
+    Threads::Scope odomScope(OdomLock);
+    Serial.printf("Yaw: %f, LocoW: %f\n", odom.yaw, pidState.locoW);
     // Threads::yield();
 }
 //
@@ -313,21 +373,32 @@ void RelayState::relayTask() {
     }
 }
 //
-// E. Blink Example
-void blinkTask() {
-    static bool state = false;
-    state = !state;
-    digitalWrite(LED_BUILTIN, state);
+void TurretYaw::turretTask() {
+    /**
+     * This task handles angling the turret.
+     * Turret can be
+     * a. manual : where joystick is used for movement
+     * b. automatic : where odometry data is used for movement.
+     *
+     * In manual; aiming, speed setting and projectile angle setting
+     * is done by the operator, whereas in automatic teensy handles
+     * this on its own. These functions/classes are of help:
+     *
+     * 1.ThreeXYEncoder -> gets the current Pose of the robot.
+     * 2. Projectile -> has several helpers:
+     * 									1.
+     */
+    if (runManually) {
+        moveTurret(velocity);
+    } else {
+        Threads::Scope turretScope(TurretLock);
+        Threads::Scope shooterScope(ShooterLock);
+        Threads::Scope PIDScope(PIDLock);
+        turret.setpoint = shooter.turretAngle;
+        moveTurret(pidState.turretOut);
+    }
 }
 //
-// F. Turret Task
-void TurretYaw::turretTask() const {
-#define TURRET_MAX 60
-    digitalWrite(TURRET_YAW_DIR, velocity > 0 ? 1 : 0);
-    analogWrite(TURRET_YAW_PWM, round(abs((velocity / 128.0f) * TURRET_MAX)));
-}
-//
-// G. Transfer Task
 void Transfer::transferPipeline() {
     bool dir = false;
     if (ControllerState::getRightTrigger(Ps3) > 0)
@@ -341,10 +412,79 @@ void Transfer::transferPipeline() {
             DRIBBLE_TO_FEED_PWM, dir ? ControllerState::getRightTrigger(Ps3) : ControllerState::getLeftTrigger(Ps3));
 }
 //
+// E. Blink Example
+void blinkTask() {
+    static bool state = false;
+    state = !state;
+    digitalWrite(LED_BUILTIN, state);
+}
+//
+// F. PID Task
+void PIDTask() {
+    float yawError = 0, turretError = 0;
+    {
+        Threads::Scope odomScope(OdomLock);
+        odom.wSetpoint = odom.yaw > 179.0f ? 359.0f : 0.0f;
+        yawError = odom.wSetpoint - odom.yaw;
+    }
+
+    yawError = yawError < -179 ? (yawError + 360) : (yawError > 179 ? (yawError - 360) : (yawError));
+
+    {
+        Threads::Scope turretScope(TurretLock);
+        turretError = turret.setpoint - turret.angle;
+    }
+
+    Threads::Scope PIDScope(PIDLock);
+    pidState.locoW = pidLocoW.get_pid(yawError, 2);
+    pidState.turretOut = pidTurret.get_pid(turretError, 1);
+}
+//
+// G. Resets
+void resetTask_threaded() {
+    bool shouldReset = false;
+    {
+        Threads::Scope odomScope(OdomLock);
+        shouldReset = abs(odom.yaw - odom.wSetpoint) < 0.5f;
+    }
+
+    if (shouldReset) {
+        Threads::Scope PIDScope(PIDLock);
+        pidState.locoW = 0.0f;
+        pidLocoW.reset_I();
+    }
+    /*OdomLock.lock();
+    if (abs(odom.yaw - odom.wSetpoint) < 5.0f) {
+        PIDLock.lock();
+        pidState.locoW = 0.0f;
+        pidLocoW.reset_I();
+        PIDLock.unlock();
+    }
+    OdomLock.unlock();*/
+}
+//
+// H. Odom Task
+void odomTask() {
+    Threads::Scope odomScope(OdomLock);
+    // This Bot pose is acquired wrt. arena, and will be used for hoop automation
+    botPose = encOdom.update(xCount, yLCount, yRCount, odom.yaw);
+    Threads::Scope shooterScope(ShooterLock);
+    // shooter instance is populated with actual values
+    projectile.getProjectile(shooter, botPose);
+}
+//
 /*---------------------------- ISR -------------------------------*/
 /*------------------------ DEFINITIONS ---------------------------*/
-void ISR_X_ENCODER() { }
-void ISR_YL_ENCODER() { }
+void ISR_X_ENCODER() {
+#ifdef R1_pins // Locomotion Encoders only exist on R1 at this point hence encoder pins aren't `well` defined on R2.
+    digitalRead(X_ENC_B) ? xCount++ : xCount--;
+#endif // R1_pins
+}
+void ISR_YL_ENCODER() {
+#ifdef R1_pins
+    digitalRead(YL_ENC_B) ? yLCount++ : yLCount--;
+#endif
+}
 void ISR_YR_ENCODER() { }
 void ISR_DRIBBLE_LASER() { }
-void ISR_TURRET() { }
+void ISR_TURRET() { digitalRead(TURRET_ENC_B) ? turretCount++ : turretCount--; }
